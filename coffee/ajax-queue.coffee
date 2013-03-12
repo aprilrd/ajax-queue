@@ -1,14 +1,39 @@
 define 'ajax-queue', ['jquery'], ($) ->
-  class PriorityQueue
+  class Queue
     constructor: ->
-      @sortedList = []
+      @list = []
       @length = 0
 
-    push: (item) ->
-      item.priority ?= 0
-      item.timestamp = new Date()
-      @sortedList.push item
-      @sortedList.sort((a, b) -> 
+    push: ({spec}) ->
+      item = {
+        spec: spec
+        id: id
+      }
+      @list.push item
+      ++@length
+      return true
+
+    shift: ->
+      --@length
+      return @list.shift()
+
+    remove: (id) ->
+      for item, i in @list
+        if item.id is id
+          @list.splice(i, 1)
+          return true
+      return false
+
+  class PriorityQueue extends Queue
+    push: ({spec, priority, id}) ->
+      item = {
+        spec: spec
+        priority: priority
+        timestamp: new Date()
+        id: id
+      }
+      @list.push item
+      @list.sort((a, b) ->
         if a.priority is b.priority
           return a.timestamp - b.timestamp
         return a.priority - b.priority
@@ -16,16 +41,14 @@ define 'ajax-queue', ['jquery'], ($) ->
       ++@length
       return true
 
-    shift: ->
-      --@length
-      return @sortedList.shift()
-
-  class AJAXQueue
+  class AsyncQueue
     constructor: (@availableConnections, @usePriority) ->
+      @id = 0
+      @working = {}
       if @usePriority
         @queue = new PriorityQueue() #PRIORITY Queue
       else
-        @queue = [] # FIFO
+        @queue = new Queue() # FIFO
 
     _increment: -> # increment available connections
       if @queue.length
@@ -38,33 +61,54 @@ define 'ajax-queue', ['jquery'], ($) ->
       --@availableConnections
       return
 
-    _ajaxCall: (item) ->
+    _ajaxCall: (spec) ->
       # Do something
-      $.ajax(item)
+      $.ajax(spec)
       return
 
-    put: (item) -> # Do checking and necessary changes to reflect
-      # Validate the item in AJAX
-      beforeSendFunction = item.beforeSend
-      item.beforeSend = (jqXHR, settings) =>
-        @_decrement()
-        return beforeSendFunction?(jqXHR, settings)
+    enqueue: (spec, priority = 5) -> # Do checking and necessary changes to reflect
+      _this = this
+      ++@id
+      # Validate the spec in AJAX
 
-      completeFunction = item.complete
-      item.complete = (jqXHR, textStatus) =>
-        console.log "complete"
-        @_increment()
-        return completeFunction?(jqXHR, textStatus)
+      beforeSendFunction = spec.beforeSend
+      spec.beforeSend = (jqXHR, settings) ->
+        _this._decrement()
+        _this.working[id] = jqXHR
+        if beforeSendFunction?
+          return beforeSendFunction.call(this, jqXHR, settings)
+        return
+
+      completeFunction = spec.complete
+      spec.complete = (jqXHR, textStatus) ->
+        _this._increment()
+        delete _this.working[id]
+        if completeFunction?
+          return completeFunction?.call(this, jqXHR, textStatus)
+        return
 
       if @availableConnections is 0
-        @queue.push(item)
+        @queue.push(spec, priority, id)
       else
-        @_ajaxCall(item)
+        @_ajaxCall(spec)
 
-      return true
+      return {
+        abort: =>
+          return @abort(id)
+      }
 
     next: ->
-      @_ajaxCall(@queue.shift())
+      @_ajaxCall(@queue.shift().spec)
       return
 
-  return AJAXQueue
+    abort: (id) ->
+      # look in the queue, if found remove
+      return true if @queue.remove(id)
+      # look in the working, if found remove
+      if @working[id]
+        @working[id].abort?()
+        delete @working[id]
+        return true
+      return false
+
+  return AsyncQueue
